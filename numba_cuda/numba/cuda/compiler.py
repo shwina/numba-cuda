@@ -16,7 +16,7 @@ from numba.cuda import nvvmutils
 from numba.cuda.api import get_current_device
 from numba.cuda.cudadrv import nvvm
 from numba.cuda.descriptor import cuda_target
-from numba.cuda.target import CUDACABICallConv
+from numba.cuda.target import CUDACABICallConv, TypingOnlyContext
 
 
 def _nvvm_options_type(x):
@@ -307,7 +307,7 @@ def type_cuda(pyfunc, return_type, args, debug=False, lineinfo=False,
               inline=False, fastmath=False, nvvm_options=None,
               cc=None, max_registers=None, lto=False):
 
-    typingctx = cuda_target.typing_context
+    typingctx = TypingOnlyContext()
     targetctx = cuda_target.target_context
 
     flags = CUDAFlags()

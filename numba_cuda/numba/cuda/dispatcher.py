@@ -14,7 +14,7 @@ from numba.core.typing.typeof import Purpose, typeof
 
 from numba.cuda.api import get_current_device
 from numba.cuda.args import wrap_arg
-from numba.cuda.compiler import compile_cuda, CUDACompiler, kernel_fixup
+from numba.cuda.compiler import compile_cuda, CUDACompiler, kernel_fixup, TypingOnlyCompiler, type_cuda
 from numba.cuda.cudadrv import driver
 from numba.cuda.cudadrv.devices import get_context
 from numba.cuda.descriptor import cuda_target
@@ -1094,3 +1094,76 @@ class CUDADispatcher(Dispatcher, serialize.ReduceMixin):
         """
         return dict(py_func=self.py_func,
                     targetoptions=self.targetoptions)
+
+
+
+class TypingOnlyDispatcher(CUDADispatcher):
+    '''
+    TODO
+    '''
+
+    # Whether to fold named arguments and default values. Default values are
+    # presently unsupported on CUDA, so we can leave this as False in all
+    # cases.
+    _fold_args = False
+
+    targetdescr = cuda_target
+
+    def __init__(self, py_func, targetoptions, pipeline_class=TypingOnlyCompiler):
+        super().__init__(py_func, targetoptions=targetoptions,
+                         pipeline_class=pipeline_class)
+
+        # The following properties are for specialization of CUDADispatchers. A
+        # specialized CUDADispatcher is one that is compiled for exactly one
+        # set of argument types, and bypasses some argument type checking for
+        # faster kernel launches.
+
+        # Is this a specialized dispatcher?
+        self._specialized = False
+
+        # If we produced specialized dispatchers, we cache them for each set of
+        # argument types
+        self.specializations = {}
+
+    @property
+    def _numba_type_(self):
+        return cuda_types.TypingOnlyDispatcher(self)
+
+
+    def compile_device(self, args, return_type=None):
+        """Compile the device function for the given argument types.
+
+        Each signature is compiled once by caching the compiled function inside
+        this object.
+
+        Returns the `CompileResult`.
+        """
+        if args not in self.overloads:
+            with self._compiling_counter:
+
+                debug = self.targetoptions.get('debug')
+                lineinfo = self.targetoptions.get('lineinfo')
+                inline = self.targetoptions.get('inline')
+                fastmath = self.targetoptions.get('fastmath')
+
+                nvvm_options = {
+                    'opt': 3 if self.targetoptions.get('opt') else 0,
+                    'fastmath': fastmath
+                }
+
+                cc = get_current_device().compute_capability
+                cres = type_cuda(self.py_func, return_type, args,
+                                    debug=debug,
+                                    lineinfo=lineinfo,
+                                    inline=inline,
+                                    fastmath=fastmath,
+                                    nvvm_options=nvvm_options,
+                                    cc=cc)
+                self.overloads[args] = cres
+        else:
+            cres = self.overloads[args]
+
+        return cres
+    
+
+    

@@ -35,3 +35,6 @@ class CUDADispatcher(types.Dispatcher):
     # is still probably a good idea to have a separate type for CUDA
     # dispatchers, and this type might get other differentiation from the CPU
     # dispatcher type in future.
+    
+class TypingOnlyDispatcher(types.Dispatcher):
+    """The type of Typing-Only CUDA dispatchers"""

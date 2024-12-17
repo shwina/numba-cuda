@@ -19,6 +19,47 @@ from numba.cuda.models import cuda_data_manager
 # Typing
 
 
+
+class TypingOnlyContext(typing.BaseContext):
+    def load_additional_registries(self):
+        from . import cudadecl, cudamath, libdevicedecl, vector_types
+        from numba.core.typing import enumdecl, cffi_utils
+
+        self.install_registry(cudadecl.registry)
+        self.install_registry(cffi_utils.registry)
+        self.install_registry(cudamath.registry)
+        self.install_registry(cmathdecl.registry)
+        self.install_registry(libdevicedecl.registry)
+        self.install_registry(enumdecl.registry)
+        self.install_registry(vector_types.typing_registry)
+
+    def resolve_value_type(self, val):
+        # treat other dispatcher object as another device function
+        from numba.cuda.dispatcher import TypingOnlyDispatcher
+        if (isinstance(val, Dispatcher) and not
+                isinstance(val, TypingOnlyDispatcher)):
+            try:
+                # use cached device function
+                val = val.__dispatcher
+            except AttributeError:
+                if not val._can_compile:
+                    raise ValueError('using cpu function on device '
+                                     'but its compilation is disabled')
+                targetoptions = val.targetoptions.copy()
+                targetoptions['device'] = True
+                targetoptions['debug'] = targetoptions.get('debug', False)
+                targetoptions['opt'] = targetoptions.get('opt', True)
+                disp = TypingOnlyDispatcher(val.py_func, targetoptions)
+                # cache the device function for future use and to avoid
+                # duplicated copy of the same function.
+                val.__dispatcher = disp
+                val = disp
+
+        # continue with parent logic
+        return super(TypingOnlyContext, self).resolve_value_type(val)
+
+
+
 class CUDATypingContext(typing.BaseContext):
     def load_additional_registries(self):
         from . import cudadecl, cudamath, libdevicedecl, vector_types
