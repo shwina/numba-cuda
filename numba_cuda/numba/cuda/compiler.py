@@ -16,7 +16,7 @@ from numba.cuda import nvvmutils
 from numba.cuda.api import get_current_device
 from numba.cuda.cudadrv import nvvm
 from numba.cuda.descriptor import cuda_target
-from numba.cuda.target import CUDACABICallConv
+from numba.cuda.target import CUDACABICallConv, TypingOnlyContext
 
 
 def _nvvm_options_type(x):
@@ -176,6 +176,8 @@ class CUDACompiler(CompilerBase):
         return pm
 
 
+    
+
 @global_compiler_lock
 def compile_cuda(pyfunc, return_type, args, debug=False, lineinfo=False,
                  inline=False, fastmath=False, nvvm_options=None,
@@ -233,6 +235,123 @@ def compile_cuda(pyfunc, return_type, args, debug=False, lineinfo=False,
 
     library = cres.library
     library.finalize()
+
+    return cres
+
+
+class TypingOnlyCompileResult(CompileResult):
+    pass
+
+
+def typing_only_compile_result(**entries):
+    entries = sanitize_compile_result_entries(entries)
+    return TypingOnlyCompileResult(**entries)
+
+
+@register_pass(mutates_CFG=True, analysis_only=False)
+class TypingOnlyBackend(LoweringPass):
+
+    _name = "typing_only_backend"
+
+    def __init__(self):
+        LoweringPass.__init__(self)
+
+    def run_pass(self, state):
+        """
+        Back-end: Packages lowering output in a compile result
+        """
+        signature = typing.signature(state.return_type, *state.args)
+
+        state.cr = typing_only_compile_result(
+            typing_context=state.typingctx,
+            target_context=state.targetctx,
+            typing_error=state.status.fail_reason,
+            type_annotation=state.type_annotation,
+            library=state.library,
+            call_helper=None,
+            signature=signature,
+            fndesc=None,
+        )
+        return True
+
+class TypingOnlyCompiler(CompilerBase):
+    def define_pipelines(self):
+        dpb = DefaultPassBuilder
+        pm = PassManager('typing_only')
+
+        untyped_passes = dpb.define_untyped_pipeline(self.state)
+        pm.passes.extend(untyped_passes.passes)
+
+        typed_passes = dpb.define_typed_pipeline(self.state)
+        pm.passes.extend(typed_passes.passes)
+
+        lowering_passes = self.define_typing_lowering_pipeline(self.state)
+        pm.passes.extend(lowering_passes.passes)
+
+        pm.finalize()
+        return [pm]
+
+    def define_typing_lowering_pipeline(self, state):
+        pm = PassManager('typing_only_lowering')
+        # legalise
+        pm.add_pass(IRLegalization,
+                    "ensure IR is legal prior to lowering")
+        pm.add_pass(AnnotateTypes, "annotate types")
+        pm.add_pass(TypingOnlyBackend, "typing only backend")
+        pm.finalize()
+        return pm
+
+
+@global_compiler_lock
+def type_cuda(pyfunc, return_type, args, debug=False, lineinfo=False,
+              inline=False, fastmath=False, nvvm_options=None,
+              cc=None, max_registers=None, lto=False):
+
+    typingctx = TypingOnlyContext()
+    targetctx = cuda_target.target_context
+
+    flags = CUDAFlags()
+    # Do not compile (generate native code), just lower (to LLVM)
+    flags.no_compile = True
+    flags.no_cpython_wrapper = True
+    flags.no_cfunc_wrapper = True
+
+    # Both debug and lineinfo turn on debug information in the compiled code,
+    # but we keep them separate arguments in case we later want to overload
+    # some other behavior on the debug flag. In particular, -opt=3 is not
+    # supported with debug enabled, and enabling only lineinfo should not
+    # affect the error model.
+    if debug or lineinfo:
+        flags.debuginfo = True
+
+    if lineinfo:
+        flags.dbg_directives_only = True
+
+    if debug:
+        flags.error_model = 'python'
+    else:
+        flags.error_model = 'numpy'
+
+    if inline:
+        flags.forceinline = True
+    if fastmath:
+        flags.fastmath = True
+    if nvvm_options:
+        flags.nvvm_options = nvvm_options
+    flags.max_registers = max_registers
+    flags.lto = lto
+
+    # Run compilation pipeline
+    from numba.core.target_extension import target_override
+    with target_override('cuda'):
+        cres = compiler.compile_extra(typingctx=typingctx,
+                             targetctx=targetctx,
+                             func=pyfunc,
+                             args=args,
+                             return_type=return_type,
+                             flags=flags,
+                             locals={},
+                             pipeline_class=TypingOnlyCompiler)
 
     return cres
 
@@ -477,7 +596,7 @@ def compile(pyfunc, sig, debug=None, lineinfo=False, device=True,
     if abi == 'c' and not device:
         raise NotImplementedError('The C ABI is not supported for kernels')
 
-    if output not in ("ptx", "ltoir"):
+    if output not in ("ptx", "ltoir", "typing"):
         raise NotImplementedError(f'Unsupported output type: {output}')
 
     debug = config.CUDA_DEBUGINFO_DEFAULT if debug is None else debug
@@ -489,6 +608,7 @@ def compile(pyfunc, sig, debug=None, lineinfo=False, device=True,
                " - set debug=False or opt=False.")
         warn(NumbaInvalidConfigWarning(msg))
 
+        
     lto = (output == 'ltoir')
     abi_info = abi_info or dict()
 
@@ -503,6 +623,12 @@ def compile(pyfunc, sig, debug=None, lineinfo=False, device=True,
     args, return_type = sigutils.normalize_signature(sig)
 
     cc = cc or config.CUDA_DEFAULT_PTX_CC
+
+    if output == 'typing':
+        args, retty = sigutils.normalize_signature(args)
+        cres = type_cuda(pyfunc, retty, args)
+        return cres.type_annotation, cres.signature
+
     cres = compile_cuda(pyfunc, return_type, args, debug=debug,
                         lineinfo=lineinfo, fastmath=fastmath,
                         nvvm_options=nvvm_options, cc=cc)
